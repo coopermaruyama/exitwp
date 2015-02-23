@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """html2text: Turn HTML into equivalent Markdown-structured text."""
-__version__ = "3.1"
+__version__ = "3.200.3"
 __author__ = "Aaron Swartz (me@aaronsw.com)"
 __copyright__ = "(C) 2004-2008 Aaron Swartz. GNU GPL 3."
 __contributors__ = ["Martin 'Joey' Schulze", "Ricardo Reyes", "Kevin Jay North"]
@@ -56,6 +56,7 @@ GOOGLE_LIST_INDENT = 36
 
 IGNORE_ANCHORS = False
 IGNORE_IMAGES = False
+IGNORE_EMPHASIS = False
 
 ### Entity Nonsense ###
 
@@ -83,42 +84,6 @@ unifiable_n = {}
 for k in unifiable.keys():
     unifiable_n[name2cp(k)] = unifiable[k]
 
-def charref(name):
-    if name[0] in ['x','X']:
-        c = int(name[1:], 16)
-    else:
-        c = int(name)
-
-    if not UNICODE_SNOB and c in unifiable_n.keys():
-        return unifiable_n[c]
-    else:
-        try:
-            return unichr(c)
-        except NameError: #Python3
-            return chr(c)
-
-def entityref(c):
-    if not UNICODE_SNOB and c in unifiable.keys():
-        return unifiable[c]
-    else:
-        try: name2cp(c)
-        except KeyError: return "&" + c + ';'
-        else:
-            try:
-                return unichr(name2cp(c))
-            except NameError: #Python3
-                return chr(name2cp(c))
-
-def replaceEntities(s):
-    s = s.group(1)
-    if s[0] == "#":
-        return charref(s[1:])
-    else: return entityref(s)
-
-r_unescape = re.compile(r"&(#?[xX]?(?:[0-9a-fA-F]+|\w{1,8}));")
-def unescape(s):
-    return r_unescape.sub(replaceEntities, s)
-
 ### End Entity Nonsense ###
 
 def onlywhite(line):
@@ -127,31 +92,6 @@ def onlywhite(line):
         if c is not ' ' and c is not '  ':
             return c is ' '
     return line
-
-def optwrap(text):
-    """Wrap all paragraphs in the provided text."""
-    if not BODY_WIDTH:
-        return text
-
-    assert wrap, "Requires Python 2.3."
-    result = ''
-    newlines = 0
-    for para in text.split("\n"):
-        if len(para) > 0:
-            if para[0] != ' ' and para[0] != '-' and para[0] != '*':
-                for line in wrap(para, BODY_WIDTH):
-                    result += line + "\n"
-                result += "\n"
-                newlines = 2
-            else:
-                if not onlywhite(para):
-                    result += para + "\n"
-                    newlines = 1
-        else:
-            if newlines < 2:
-                result += "\n"
-                newlines += 1
-    return result
 
 def hn(tag):
     if tag[0] == 'h' and len(tag) == 2:
@@ -174,7 +114,10 @@ def dumb_css_parser(data):
 
     # parse the css. reverted from dictionary compehension in order to support older pythons
     elements =  [x.split('{') for x in data.split('}') if '{' in x.strip()]
-    elements = dict([(a.strip(), dumb_property_dict(b)) for a, b in elements])
+    try:
+        elements = dict([(a.strip(), dumb_property_dict(b)) for a, b in elements])
+    except ValueError:
+        elements = {} # not that important
 
     return elements
 
@@ -197,13 +140,6 @@ def google_list_style(style):
         if list_style in ['disc', 'circle', 'square', 'none']:
             return 'ul'
     return 'ol'
-
-def google_nest_count(style):
-    """calculate the nesting count of google doc lists"""
-    nest_count = 0
-    if 'margin-left' in style:
-        nest_count = int(style['margin-left'][:-2]) / GOOGLE_LIST_INDENT
-    return nest_count
 
 def google_has_height(style):
     """check if the style of the element has the 'height' attribute explicitly defined"""
@@ -238,13 +174,26 @@ def list_numbering_start(attrs):
     else:
         return 0
 
-class _html2text(HTMLParser.HTMLParser):
+class HTML2Text(HTMLParser.HTMLParser):
     def __init__(self, out=None, baseurl=''):
         HTMLParser.HTMLParser.__init__(self)
 
+        # Config options
+        self.unicode_snob = UNICODE_SNOB
+        self.links_each_paragraph = LINKS_EACH_PARAGRAPH
+        self.body_width = BODY_WIDTH
+        self.skip_internal_links = SKIP_INTERNAL_LINKS
+        self.inline_links = INLINE_LINKS
+        self.google_list_indent = GOOGLE_LIST_INDENT
+        self.ignore_links = IGNORE_ANCHORS
+        self.ignore_images = IGNORE_IMAGES
+        self.ignore_emphasis = IGNORE_EMPHASIS
+        self.google_doc = False
+        self.ul_item_mark = '*'
+
         if out is None: self.out = self.outtextf
         else: self.out = out
-        self.outtextlist = [] # empty list to store output characters before they are  "joined"
+        self.outtextlist = [] # empty list to store output characters before they are "joined"
         try:
             self.outtext = unicode()
         except NameError: # Python3
@@ -276,13 +225,19 @@ class _html2text(HTMLParser.HTMLParser):
         self.abbr_list = {} # stack of abbreviations to write later
         self.baseurl = baseurl
 
-        if options.google_doc:
-            del unifiable_n[name2cp('nbsp')]
-            unifiable['nbsp'] = '&nbsp_place_holder;'
+        try: del unifiable_n[name2cp('nbsp')]
+        except KeyError: pass
+        unifiable['nbsp'] = '&nbsp_place_holder;'
+
 
     def feed(self, data):
         data = data.replace("</' + 'script>", "</ignore>")
         HTMLParser.HTMLParser.feed(self, data)
+
+    def handle(self, data):
+        self.feed(data)
+        self.feed("")
+        return self.optwrap(self.close())
 
     def outtextf(self, s):
         self.outtextlist.append(s)
@@ -296,16 +251,16 @@ class _html2text(HTMLParser.HTMLParser):
 
         self.outtext = self.outtext.join(self.outtextlist)
 
-        if options.google_doc:
+        if self.google_doc:
             self.outtext = self.outtext.replace('&nbsp_place_holder;', ' ');
 
         return self.outtext
 
     def handle_charref(self, c):
-        self.o(charref(c), 1)
+        self.o(self.charref(c), 1)
 
     def handle_entityref(self, c):
-        self.o(entityref(c), 1)
+        self.o(self.entityref(c), 1)
 
     def handle_starttag(self, tag, attrs):
         self.handle_tag(tag, attrs, 1)
@@ -340,17 +295,13 @@ class _html2text(HTMLParser.HTMLParser):
         if not self.quiet:
             self.outtext = self.outtext[:-nLetters]
 
-    def handle_comment(self, data):
-        if data == "more":
-            self.o("<!-- more -->")
-
     def handle_emphasis(self, start, tag_style, parent_style):
         """handles various text emphases"""
         tag_emphasis = google_text_emphasis(tag_style)
         parent_emphasis = google_text_emphasis(parent_style)
 
         # handle Google's text emphasis
-        strikethrough =  'line-through' in tag_emphasis and options.hide_strikethrough
+        strikethrough =  'line-through' in tag_emphasis and self.hide_strikethrough
         bold = 'bold' in tag_emphasis and not 'bold' in parent_emphasis
         italic = 'italic' in tag_emphasis and not 'italic' in parent_emphasis
         fixed = google_fixed_width_font(tag_style) and not \
@@ -408,22 +359,13 @@ class _html2text(HTMLParser.HTMLParser):
                 self.quiet -= 1
 
     def handle_tag(self, tag, attrs, start):
+        #attrs = fixattrs(attrs)
         if attrs is None:
             attrs = {}
         else:
             attrs = dict(attrs)
 
-        if self.pre and not tag == "pre":
-            if start:
-                attrs_string = ""
-                for k, v in attrs.items():
-                    attrs_string += " " + k + "=\"" + v + "\""
-                self.o("<"+tag+attrs_string+">")
-            else:
-                self.o("</"+tag+">")
-            return None
-
-        if options.google_doc:
+        if self.google_doc:
             # the attrs parameter is empty for a closing tag. in addition, we
             # need the attributes of the parent nodes in order to get a
             # complete style description for the current element. we assume
@@ -449,7 +391,7 @@ class _html2text(HTMLParser.HTMLParser):
                 return # prevent redundant emphasis marks on headers
 
         if tag in ['p', 'div']:
-            if options.google_doc:
+            if self.google_doc:
                 if start and google_has_height(tag_style):
                     self.p()
                 else:
@@ -477,28 +419,26 @@ class _html2text(HTMLParser.HTMLParser):
 
         if tag == "blockquote":
             if start:
-                self.p(); self.o('<blockquote>', 0, 1); self.start = 1
-                # self.p(); self.o('> ', 0, 1); self.start = 1
+                self.p(); self.o('> ', 0, 1); self.start = 1
                 self.blockquote += 1
             else:
-                self.o('</blockquote>', 0, 1)
                 self.blockquote -= 1
                 self.p()
 
-        if tag in ['em', 'i', 'u']: self.o("_")
-        if tag in ['strong', 'b']: self.o("**")
+        if tag in ['em', 'i', 'u'] and not self.ignore_emphasis: self.o("_")
+        if tag in ['strong', 'b'] and not self.ignore_emphasis: self.o("**")
         if tag in ['del', 'strike']:
             if start:
                 self.o("<"+tag+">")
             else:
                 self.o("</"+tag+">")
 
-        if options.google_doc:
+        if self.google_doc:
             if not self.inheader:
                 # handle some font attributes, but leave headers clean
                 self.handle_emphasis(start, tag_style, parent_style)
 
-        if tag == "code" and not self.pre: self.o('`') #TODO: `` `this` ``
+        if tag in ["code", "tt"] and not self.pre: self.o('`') #TODO: `` `this` ``
         if tag == "abbr":
             if start:
                 self.abbr_title = None
@@ -511,9 +451,9 @@ class _html2text(HTMLParser.HTMLParser):
                     self.abbr_title = None
                 self.abbr_data = ''
 
-        if tag == "a" and not IGNORE_ANCHORS:
+        if tag == "a" and not self.ignore_links:
             if start:
-                if has_key(attrs, 'href') and not (SKIP_INTERNAL_LINKS and attrs['href'].startswith('#')):
+                if has_key(attrs, 'href') and not (self.skip_internal_links and attrs['href'].startswith('#')):
                     self.astack.append(attrs)
                     self.o("[")
                 else:
@@ -522,7 +462,7 @@ class _html2text(HTMLParser.HTMLParser):
                 if self.astack:
                     a = self.astack.pop()
                     if a:
-                        if INLINE_LINKS:
+                        if self.inline_links:
                             self.o("](" + a['href'] + ")")
                         else:
                             i = self.previousIndex(a)
@@ -535,11 +475,11 @@ class _html2text(HTMLParser.HTMLParser):
                                 self.a.append(a)
                             self.o("][" + str(a['count']) + "]")
 
-        if tag == "img" and start and not IGNORE_IMAGES:
+        if tag == "img" and start and not self.ignore_images:
             if has_key(attrs, 'src'):
                 attrs['href'] = attrs['src']
                 alt = attrs.get('alt', '')
-                if INLINE_LINKS:
+                if self.inline_links:
                     self.o("![")
                     self.o(alt)
                     self.o("]("+ attrs['href'] +")")
@@ -566,7 +506,7 @@ class _html2text(HTMLParser.HTMLParser):
             if (not self.list) and (not self.lastWasList):
                 self.p()
             if start:
-                if options.google_doc:
+                if self.google_doc:
                     list_style = google_list_style(tag_style)
                 else:
                     list_style = tag
@@ -583,28 +523,19 @@ class _html2text(HTMLParser.HTMLParser):
             if start:
                 if self.list: li = self.list[-1]
                 else: li = {'name':'ul', 'num':0}
-                if options.google_doc:
-                    nest_count = google_nest_count(tag_style)
+                if self.google_doc:
+                    nest_count = self.google_nest_count(tag_style)
                 else:
                     nest_count = len(self.list)
                 self.o("  " * nest_count) #TODO: line up <ol><li>s > 9 correctly.
-                if li['name'] == "ul": self.o(options.ul_item_mark + " ")
+                if li['name'] == "ul": self.o(self.ul_item_mark + " ")
                 elif li['name'] == "ol":
                     li['num'] += 1
                     self.o(str(li['num'])+". ")
                 self.start = 1
 
-        # if tag in ["table", "tr"] and start: self.p()
+        if tag in ["table", "tr"] and start: self.p()
         if tag == 'td': self.pbr()
-        if tag in ["table","tbody","td","tr"]:
-            temp = ""
-            if attrs:
-                for (k,v) in  attrs.items():
-                    temp += k+"="+"\""+v+"\""+" "
-            if start:
-                self.o("<"+tag+" "+temp+">", 0, 1)
-            else:
-                self.o("</"+tag+">",0,1)
 
         if tag == "pre":
             if start:
@@ -627,7 +558,7 @@ class _html2text(HTMLParser.HTMLParser):
         if self.abbr_data is not None: self.abbr_data += data
 
         if not self.quiet:
-            if options.google_doc:
+            if self.google_doc:
                 # prevent white space immediately after 'begin emphasis' marks ('**' and '_')
                 lstripped_data = data.lstrip()
                 if self.drop_white_space and not (self.pre or self.code):
@@ -636,7 +567,7 @@ class _html2text(HTMLParser.HTMLParser):
                     self.drop_white_space = 0
 
             if puredata and not self.pre:
-#                data = re.sub('\s+', ' ', data)
+                data = re.sub('\s+', ' ', data)
                 if data and data[0] == ' ':
                     self.space = 1
                     data = data[1:]
@@ -673,7 +604,7 @@ class _html2text(HTMLParser.HTMLParser):
                 if not self.lastWasNL: self.out(' ')
                 self.space = 0
 
-            if self.a and ((self.p_p == 2 and LINKS_EACH_PARAGRAPH) or force == "end"):
+            if self.a and ((self.p_p == 2 and self.links_each_paragraph) or force == "end"):
                 if force == "end": self.out("\n")
 
                 newa = []
@@ -707,6 +638,75 @@ class _html2text(HTMLParser.HTMLParser):
 
     def unknown_decl(self, data): pass
 
+    def charref(self, name):
+        if name[0] in ['x','X']:
+            c = int(name[1:], 16)
+        else:
+            c = int(name)
+
+        if not self.unicode_snob and c in unifiable_n.keys():
+            return unifiable_n[c]
+        else:
+            try:
+                return unichr(c)
+            except NameError: #Python3
+                return chr(c)
+
+    def entityref(self, c):
+        if not self.unicode_snob and c in unifiable.keys():
+            return unifiable[c]
+        else:
+            try: name2cp(c)
+            except KeyError: return "&" + c + ';'
+            else:
+                try:
+                    return unichr(name2cp(c))
+                except NameError: #Python3
+                    return chr(name2cp(c))
+
+    def replaceEntities(self, s):
+        s = s.group(1)
+        if s[0] == "#":
+            return self.charref(s[1:])
+        else: return self.entityref(s)
+
+    r_unescape = re.compile(r"&(#?[xX]?(?:[0-9a-fA-F]+|\w{1,8}));")
+    def unescape(self, s):
+        return self.r_unescape.sub(self.replaceEntities, s)
+
+    def google_nest_count(self, style):
+        """calculate the nesting count of google doc lists"""
+        nest_count = 0
+        if 'margin-left' in style:
+            nest_count = int(style['margin-left'][:-2]) / self.google_list_indent
+        return nest_count
+
+
+    def optwrap(self, text):
+        """Wrap all paragraphs in the provided text."""
+        if not self.body_width:
+            return text
+
+        assert wrap, "Requires Python 2.3."
+        result = ''
+        newlines = 0
+        for para in text.split("\n"):
+            if len(para) > 0:
+                if para[0] != ' ' and para[0] != '-' and para[0] != '*':
+                    for line in wrap(para, self.body_width):
+                        result += line + "\n"
+                    result += "\n"
+                    newlines = 2
+                else:
+                    if not onlywhite(para):
+                        result += para + "\n"
+                        newlines = 1
+            else:
+                if newlines < 2:
+                    result += "\n"
+                    newlines += 1
+        return result
+
 def wrapwrite(text):
     text = text.encode('utf-8')
     try: #Python3
@@ -714,50 +714,42 @@ def wrapwrite(text):
     except AttributeError:
         sys.stdout.write(text)
 
-def html2text_file(html, out=wrapwrite, baseurl=''):
-    h = _html2text(out, baseurl)
-    h.feed(html)
-    h.feed("")
-    return h.close()
-
 def html2text(html, baseurl=''):
-    return optwrap(html2text_file(html, None, baseurl))
+    h = HTML2Text(baseurl=baseurl)
+    return h.handle(html)
 
-class Storage: pass
-options = Storage()
-options.google_doc = False
-options.ul_item_mark = '*'
+def unescape(s, unicode_snob=False):
+    h = HTML2Text()
+    h.unicode_snob = unicode_snob
+    return h.unescape(s)
 
-if __name__ == "__main__":
+def main():
     baseurl = ''
 
     p = optparse.OptionParser('%prog [(filename|url) [encoding]]',
                               version='%prog ' + __version__)
+    p.add_option("--ignore-emphasis", dest="ignore_emphasis", action="store_true",
+        default=IGNORE_EMPHASIS, help="don't include any formatting for emphasis")
+    p.add_option("--ignore-links", dest="ignore_links", action="store_true",
+        default=IGNORE_ANCHORS, help="don't include any formatting for links")
+    p.add_option("--ignore-images", dest="ignore_images", action="store_true",
+        default=IGNORE_IMAGES, help="don't include any formatting for images")
     p.add_option("-g", "--google-doc", action="store_true", dest="google_doc",
         default=False, help="convert an html-exported Google Document")
     p.add_option("-d", "--dash-unordered-list", action="store_true", dest="ul_style_dash",
         default=False, help="use a dash rather than a star for unordered list items")
     p.add_option("-b", "--body-width", dest="body_width", action="store", type="int",
-        default=78, help="number of characters per output line, 0 for no wrap")
+        default=BODY_WIDTH, help="number of characters per output line, 0 for no wrap")
     p.add_option("-i", "--google-list-indent", dest="list_indent", action="store", type="int",
         default=GOOGLE_LIST_INDENT, help="number of pixels Google indents nested lists")
     p.add_option("-s", "--hide-strikethrough", action="store_true", dest="hide_strikethrough",
         default=False, help="hide strike-through text. only relevent when -g is specified as well")
     (options, args) = p.parse_args()
 
-    # handle options
-    if options.ul_style_dash:
-        options.ul_item_mark = '-'
-    else:
-        options.ul_item_mark = '*'
-
-    BODY_WIDTH = options.body_width
-    GOOGLE_LIST_INDENT = options.list_indent
-
     # process input
+    encoding = "utf-8"
     if len(args) > 0:
         file_ = args[0]
-        encoding = None
         if len(args) == 2:
             encoding = args[1]
         if len(args) > 2:
@@ -766,17 +758,15 @@ if __name__ == "__main__":
         if file_.startswith('http://') or file_.startswith('https://'):
             baseurl = file_
             j = urllib.urlopen(baseurl)
-            text = j.read()
+            data = j.read()
             if encoding is None:
                 try:
                     from feedparser import _getCharacterEncoding as enc
                 except ImportError:
                     enc = lambda x, y: ('utf-8', 1)
-                encoding = enc(j.headers, text)[0]
+                encoding = enc(j.headers, data)[0]
                 if encoding == 'us-ascii':
                     encoding = 'utf-8'
-            data = text.decode(encoding)
-
         else:
             data = open(file_, 'rb').read()
             if encoding is None:
@@ -785,8 +775,24 @@ if __name__ == "__main__":
                 except ImportError:
                     detect = lambda x: {'encoding': 'utf-8'}
                 encoding = detect(data)['encoding']
-            data = data.decode(encoding)
     else:
         data = sys.stdin.read()
-    wrapwrite(html2text(data, baseurl))
 
+    data = data.decode(encoding)
+    h = HTML2Text(baseurl=baseurl)
+    # handle options
+    if options.ul_style_dash: h.ul_item_mark = '-'
+
+    h.body_width = options.body_width
+    h.list_indent = options.list_indent
+    h.ignore_emphasis = options.ignore_emphasis
+    h.ignore_links = options.ignore_links
+    h.ignore_images = options.ignore_images
+    h.google_doc = options.google_doc
+    h.hide_strikethrough = options.hide_strikethrough
+
+    wrapwrite(h.handle(data))
+
+
+if __name__ == "__main__":
+    main()

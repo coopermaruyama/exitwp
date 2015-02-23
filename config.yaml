@@ -5,7 +5,7 @@ wp_exports: wordpress-xml
 build_dir: build
 
 # Output format: primary choices are html or markdown.
-target_format: markdown
+target_format: html
 
 # The date format of the wikipedia export file.
 # I'm not sure if this ever differs depending on wordpress localization.
@@ -13,7 +13,7 @@ target_format: markdown
 date_format: '%Y-%m-%d %H:%M:%S'
 
 # Try to download and reloacate all images locally to the blog.
-download_images: False
+download_images: true
 
 # Item types we don't want to import.
 item_type_filter: {attachment, nav_menu_item}
@@ -33,10 +33,11 @@ taxonomies:
 # Replace certain patterns in body
 # Simply replace the key with its value
 body_replace: {
-  # '<pre.*?lang="(.*?)".*?>': '\n{% codeblock \1 lang:\1 %}\n',
+  'http://convertify.io/wp-content/uploads/[0-9]+/[0-9]+/': '/media/images/{{ page.date | date: 91823x2 }}-{{ page.slug }}/'
   # '<pre.*?>': '\n{% codeblock %}\n',
   # '</pre>': '\n{% endcodeblock %}\n',
-
+     # '\[imageframe.*?\]': '',
+     # '\[\/imageframe\]': ''
 #    '[python]': '{% codeblock lang:python %}',
 #    '[/python]': '{% endcodeblock %}',
 }
